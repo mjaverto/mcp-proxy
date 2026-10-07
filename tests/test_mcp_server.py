@@ -225,6 +225,11 @@ def mock_stdio_params() -> StdioServerParameters:
     )
 
 
+async def _fake_run(_self: object, *, task_status: t.Any = None) -> None:  # noqa: ANN401
+    """Stand-in for SupervisedBackend.run: report started, spawn nothing."""
+    task_status.started()
+
+
 def setup_async_context_mocks() -> tuple[
     contextlib.AbstractContextManager[tuple[AsyncMock, AsyncMock]],
     contextlib.AbstractContextManager[tuple[AsyncMock, AsyncMock]],
@@ -267,19 +272,16 @@ async def test_run_mcp_server_with_default_server(
 ) -> None:
     """Test run_mcp_server with a default server configuration."""
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Server") as mock_uvicorn_server,
         patch("mcp_proxy.mcp_server.logger") as mock_logger,
     ):
         # Setup mocks
-        mock_stdio_context, mock_session_context, mock_session, mock_http_manager, mock_routes = (
+        mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -292,14 +294,14 @@ async def test_run_mcp_server_with_default_server(
         await run_mcp_server(mock_settings, mock_stdio_params, {})
 
         # Verify calls
-        mock_stdio_client.assert_called_once_with(mock_stdio_params)
-        mock_create_proxy.assert_called_once_with(mock_session)
+        mock_create_proxy.assert_called_once()
         mock_create_routes.assert_called_once_with(
             mock_proxy,
             stateless_instance=mock_settings.stateless,
         )
         mock_logger.info.assert_any_call(
-            "Setting up default server: %s %s",
+            "Setting up server '%s': %s %s",
+            "default",
             mock_stdio_params.command,
             " ".join(mock_stdio_params.args),
         )
@@ -322,8 +324,7 @@ async def test_run_mcp_server_with_named_servers(
     }
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Server") as mock_uvicorn_server,
@@ -333,8 +334,6 @@ async def test_run_mcp_server_with_named_servers(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -347,19 +346,18 @@ async def test_run_mcp_server_with_named_servers(
         await run_mcp_server(mock_settings, None, named_servers)
 
         # Verify calls
-        assert mock_stdio_client.call_count == 2
         assert mock_create_proxy.call_count == 2
         assert mock_create_routes.call_count == 2
 
         # Check that named servers were logged
         mock_logger.info.assert_any_call(
-            "Setting up named server '%s': %s %s",
+            "Setting up server '%s': %s %s",
             "server1",
             mock_stdio_params.command,
             " ".join(mock_stdio_params.args),
         )
         mock_logger.info.assert_any_call(
-            "Setting up named server '%s': %s %s",
+            "Setting up server '%s': %s %s",
             "server2",
             "python",
             "-m mcp_server",
@@ -379,8 +377,7 @@ async def test_run_mcp_server_with_cors_middleware(
     )
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("mcp_proxy.mcp_server.Starlette") as mock_starlette,
@@ -390,8 +387,6 @@ async def test_run_mcp_server_with_cors_middleware(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -425,8 +420,7 @@ async def test_run_mcp_server_custom_expose_headers(
     )
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("mcp_proxy.mcp_server.Starlette") as mock_starlette,
@@ -439,8 +433,6 @@ async def test_run_mcp_server_custom_expose_headers(
             mock_http_manager,
             mock_routes,
         ) = setup_async_context_mocks()
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -468,8 +460,7 @@ async def test_run_mcp_server_debug_mode(
     )
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("mcp_proxy.mcp_server.Starlette") as mock_starlette,
@@ -479,8 +470,6 @@ async def test_run_mcp_server_debug_mode(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -509,8 +498,7 @@ async def test_run_mcp_server_stateless_mode(
     )
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Server") as mock_uvicorn_server,
@@ -519,8 +507,6 @@ async def test_run_mcp_server_stateless_mode(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -545,8 +531,7 @@ async def test_run_mcp_server_uvicorn_config(
 ) -> None:
     """Test run_mcp_server creates correct uvicorn configuration."""
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Config") as mock_uvicorn_config,
@@ -556,8 +541,6 @@ async def test_run_mcp_server_uvicorn_config(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -581,49 +564,6 @@ async def test_run_mcp_server_uvicorn_config(
         assert call_args.kwargs["log_level"] == mock_settings.log_level.lower()
 
 
-async def test_run_mcp_server_global_status_updates(
-    mock_settings: MCPServerSettings,
-    mock_stdio_params: StdioServerParameters,
-) -> None:
-    """Test run_mcp_server updates global status correctly."""
-    from mcp_proxy.mcp_server import _global_status  # noqa: PLC0415
-
-    # Clear global status before test
-    _global_status["server_instances"].clear()
-
-    named_servers = {"test_server": mock_stdio_params}
-
-    with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
-        patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
-        patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
-        patch("uvicorn.Server") as mock_uvicorn_server,
-    ):
-        # Setup mocks
-        mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
-            setup_async_context_mocks()
-        )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
-
-        mock_proxy = AsyncMock()
-        mock_create_proxy.return_value = mock_proxy
-        mock_create_routes.return_value = (mock_routes, mock_http_manager)
-
-        mock_server_instance = AsyncMock()
-        mock_uvicorn_server.return_value = mock_server_instance
-
-        # Run the function
-        await run_mcp_server(mock_settings, mock_stdio_params, named_servers)
-
-        # Verify global status was updated
-        assert "default" in _global_status["server_instances"]
-        assert "test_server" in _global_status["server_instances"]
-        assert _global_status["server_instances"]["default"] == "configured"
-        assert _global_status["server_instances"]["test_server"] == "configured"
-
-
 async def test_run_mcp_server_sse_url_logging(
     mock_settings: MCPServerSettings,
     mock_stdio_params: StdioServerParameters,
@@ -632,8 +572,7 @@ async def test_run_mcp_server_sse_url_logging(
     named_servers = {"test_server": mock_stdio_params}
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Server") as mock_uvicorn_server,
@@ -643,8 +582,6 @@ async def test_run_mcp_server_sse_url_logging(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -667,26 +604,6 @@ async def test_run_mcp_server_sse_url_logging(
         mock_logger.info.assert_any_call("  - %s", expected_named_url)
 
 
-async def test_run_mcp_server_exception_handling(
-    mock_settings: MCPServerSettings,
-    mock_stdio_params: StdioServerParameters,
-) -> None:
-    """Test run_mcp_server handles exceptions properly."""
-    with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession"),
-    ):
-        # Setup mocks to raise an exception
-        mock_stdio_client.side_effect = Exception("Connection failed")
-
-        # Should not raise, function should handle exceptions gracefully
-        try:
-            await run_mcp_server(mock_settings, mock_stdio_params, {})
-        except Exception as e:  # noqa: BLE001
-            # If an exception is raised, it should be the expected one
-            assert "Connection failed" in str(e)  # noqa: PT017
-
-
 async def test_run_mcp_server_both_default_and_named_servers(
     mock_settings: MCPServerSettings,
     mock_stdio_params: StdioServerParameters,
@@ -695,8 +612,7 @@ async def test_run_mcp_server_both_default_and_named_servers(
     named_servers = {"named_server": mock_stdio_params}
 
     with (
-        patch("mcp_proxy.mcp_server.stdio_client") as mock_stdio_client,
-        patch("mcp_proxy.mcp_server.ClientSession") as mock_client_session,
+        patch("mcp_proxy.mcp_server.SupervisedBackend.run", _fake_run),
         patch("mcp_proxy.mcp_server.create_proxy_server") as mock_create_proxy,
         patch("mcp_proxy.mcp_server.create_single_instance_routes") as mock_create_routes,
         patch("uvicorn.Server") as mock_uvicorn_server,
@@ -706,8 +622,6 @@ async def test_run_mcp_server_both_default_and_named_servers(
         mock_stdio_context, mock_session_context, _, mock_http_manager, mock_routes = (
             setup_async_context_mocks()
         )
-        mock_stdio_client.return_value = mock_stdio_context
-        mock_client_session.return_value = mock_session_context
 
         mock_proxy = AsyncMock()
         mock_create_proxy.return_value = mock_proxy
@@ -720,18 +634,18 @@ async def test_run_mcp_server_both_default_and_named_servers(
         await run_mcp_server(mock_settings, mock_stdio_params, named_servers)
 
         # Verify both servers were set up
-        assert mock_stdio_client.call_count == 2  # One for default, one for named
         assert mock_create_proxy.call_count == 2
         assert mock_create_routes.call_count == 2
 
         # Verify logging for both servers
         mock_logger.info.assert_any_call(
-            "Setting up default server: %s %s",
+            "Setting up server '%s': %s %s",
+            "default",
             mock_stdio_params.command,
             " ".join(mock_stdio_params.args),
         )
         mock_logger.info.assert_any_call(
-            "Setting up named server '%s': %s %s",
+            "Setting up server '%s': %s %s",
             "named_server",
             mock_stdio_params.command,
             " ".join(mock_stdio_params.args),

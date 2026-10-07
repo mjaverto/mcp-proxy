@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Final, Literal
 
+import anyio
 import uvicorn
-from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import StdioServerParameters
 from mcp.server import Server as MCPServerSDK  # Renamed to avoid conflict
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -22,6 +22,7 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from .proxy_server import create_proxy_server
+from .supervised_backend import SupervisedBackend
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,9 @@ class MCPServerSettings:
 # To store last activity for multiple servers if needed, though status endpoint is global for now.
 _global_status: dict[str, Any] = {
     "api_last_activity": datetime.now(timezone.utc).isoformat(),
-    "server_instances": {},  # Could be used to store per-instance status later
+    "server_instances": {},
 }
+_backends: dict[str, SupervisedBackend] = {}
 
 
 def _update_global_activity() -> None:
@@ -70,7 +72,8 @@ HTTP_METHODS = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRA
 
 async def _handle_status(_: Request) -> Response:
     """Global health check and service usage monitoring endpoint."""
-    return JSONResponse(_global_status)
+    instances = {name: backend.status() for name, backend in _backends.items()}
+    return JSONResponse({**_global_status, "server_instances": instances})
 
 
 def create_single_instance_routes(
@@ -146,7 +149,7 @@ def create_single_instance_routes(
     return routes, http_session_manager
 
 
-async def run_mcp_server(
+async def run_mcp_server(  # noqa: C901
     mcp_settings: MCPServerSettings,
     default_server_params: StdioServerParameters | None = None,
     named_server_params: dict[str, StdioServerParameters] | None = None,
@@ -168,49 +171,38 @@ async def run_mcp_server(
             yield
             logger.info("Main application lifespan shutting down...")
 
-        # Setup default server if configured
-        if default_server_params:
-            logger.info(
-                "Setting up default server: %s %s",
-                default_server_params.command,
-                " ".join(default_server_params.args),
-            )
-            stdio_streams = await stack.enter_async_context(stdio_client(default_server_params))
-            session = await stack.enter_async_context(ClientSession(*stdio_streams))
-            proxy = await create_proxy_server(session)
+        # Each stdio backend runs under its own supervisor task, which restarts it if it dies.
+        supervisors = await stack.enter_async_context(anyio.create_task_group())
+        stack.callback(supervisors.cancel_scope.cancel)  # runs before the group exits
 
-            instance_routes, http_manager = create_single_instance_routes(
+        backend_params = dict(named_server_params)
+        if default_server_params:
+            backend_params = {"default": default_server_params, **backend_params}
+
+        # Start every backend first so slow or broken ones start in parallel.
+        for name, params in backend_params.items():
+            logger.info(
+                "Setting up server '%s': %s %s", name, params.command, " ".join(params.args)
+            )
+            _backends[name] = SupervisedBackend(name, params)
+            await supervisors.start(_backends[name].run)
+
+        for name in backend_params:
+            try:
+                proxy = await create_proxy_server(_backends[name])  # type: ignore[arg-type]
+            except TimeoutError:
+                logger.error("Server '%s' did not start; not serving it", name)  # noqa: TRY400
+                _backends[name].stop()
+                continue
+            routes, http_manager = create_single_instance_routes(
                 proxy,
                 stateless_instance=mcp_settings.stateless,
             )
-            await stack.enter_async_context(http_manager.run())  # Manage lifespan by calling run()
-            all_routes.extend(instance_routes)
-            _global_status["server_instances"]["default"] = "configured"
-
-        # Setup named servers
-        for name, params in named_server_params.items():
-            logger.info(
-                "Setting up named server '%s': %s %s",
-                name,
-                params.command,
-                " ".join(params.args),
-            )
-            stdio_streams_named = await stack.enter_async_context(stdio_client(params))
-            session_named = await stack.enter_async_context(ClientSession(*stdio_streams_named))
-            proxy_named = await create_proxy_server(session_named)
-
-            instance_routes_named, http_manager_named = create_single_instance_routes(
-                proxy_named,
-                stateless_instance=mcp_settings.stateless,
-            )
-            await stack.enter_async_context(
-                http_manager_named.run(),
-            )  # Manage lifespan by calling run()
-
-            # Mount these routes under /servers/<name>/
-            server_mount = Mount(f"/servers/{name}", routes=instance_routes_named)
-            all_routes.append(server_mount)
-            _global_status["server_instances"][name] = "configured"
+            await stack.enter_async_context(http_manager.run())
+            if name == "default" and default_server_params:
+                all_routes.extend(routes)
+            else:
+                all_routes.append(Mount(f"/servers/{name}", routes=routes))
 
         if not default_server_params and not named_server_params:
             logger.error("No servers configured to run.")

@@ -25,6 +25,23 @@
     - [Example config file](#example-config-file)
   - [Testing](#testing)
 
+## Mike's fork
+
+Fork of [sparfenyuk/mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) (v0.12.0) that Mike runs locally. Default branch: `fix/supervise-stdio-backends`.
+
+What changed:
+
+- Each stdio backend runs under its own supervisor task (`src/mcp_proxy/supervised_backend.py`). That task opens and closes the backend's `stdio_client` and `ClientSession` itself.
+- When a backend process exits or its pipe closes, the supervisor restarts it with backoff (1s up to 30s). The HTTP endpoint and client sessions stay up.
+- JSON-RPC errors (for example `Method not found` on `resources/list`) go back to the client. They never trigger a restart.
+- A backend that crashes doesn't affect the others. A backend that never starts (60s) is logged, left unserved, and doesn't block the rest.
+- `/status` shows each backend's `state` (`up`, `restarting`, `stopped`) and `restarts` count.
+- `mcp>=1.27.1,<2` (mcp 2.0 breaks the proxy).
+
+How it runs: `uv tool install --force --editable ~/src/mcp-proxy-supervise --no-config --default-index https://pypi.org/simple`. The launchd job `com.mjaverto.mcp-proxy` starts it with `--named-server-config ~/.config/mcp-proxy/servers.json --port 9700 --pass-environment`. `~/.config/mcp-proxy/healthcheck.sh` restarts the proxy when a server fails two checks in a row, and trims the logs to 10k lines once they pass 50 MB.
+
+Tests: `uv run --no-config pytest tests/test_supervised_backend.py`.
+
 ## About
 
 The `mcp-proxy` is a tool that lets you switch between server transports. There are two supported modes:
