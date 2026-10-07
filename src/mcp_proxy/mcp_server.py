@@ -22,6 +22,7 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import Receive, Scope, Send
 
 from .proxy_server import create_proxy_server
+from .resilient_backend import ResilientBackend
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,10 @@ async def run_mcp_server(
             all_routes.extend(instance_routes)
             _global_status["server_instances"]["default"] = "configured"
 
-        # Setup named servers
+        # Setup named servers using ResilientBackend for auto-reconnect.
+        # Each backend manages its own stdio lifecycle and can respawn
+        # independently without affecting other servers.
+        resilient_backends: list[ResilientBackend] = []
         for name, params in named_server_params.items():
             logger.info(
                 "Setting up named server '%s': %s %s",
@@ -194,22 +198,32 @@ async def run_mcp_server(
                 params.command,
                 " ".join(params.args),
             )
-            stdio_streams_named = await stack.enter_async_context(stdio_client(params))
-            session_named = await stack.enter_async_context(ClientSession(*stdio_streams_named))
-            proxy_named = await create_proxy_server(session_named)
+            try:
+                backend = ResilientBackend(name, params)
+                await backend.start()
+                resilient_backends.append(backend)
 
-            instance_routes_named, http_manager_named = create_single_instance_routes(
-                proxy_named,
-                stateless_instance=mcp_settings.stateless,
-            )
-            await stack.enter_async_context(
-                http_manager_named.run(),
-            )  # Manage lifespan by calling run()
+                proxy_named = await create_proxy_server(backend)
 
-            # Mount these routes under /servers/<name>/
-            server_mount = Mount(f"/servers/{name}", routes=instance_routes_named)
-            all_routes.append(server_mount)
-            _global_status["server_instances"][name] = "configured"
+                instance_routes_named, http_manager_named = create_single_instance_routes(
+                    proxy_named,
+                    stateless_instance=mcp_settings.stateless,
+                )
+                await stack.enter_async_context(
+                    http_manager_named.run(),
+                )  # Manage lifespan by calling run()
+
+                # Mount these routes under /servers/<name>/
+                server_mount = Mount(f"/servers/{name}", routes=instance_routes_named)
+                all_routes.append(server_mount)
+                _global_status["server_instances"][name] = "configured"
+            except Exception:
+                logger.exception(
+                    "Failed to start named server '%s' — skipping. "
+                    "Remaining servers will still be available.",
+                    name,
+                )
+                _global_status["server_instances"][name] = "failed"
 
         if not default_server_params and not named_server_params:
             logger.error("No servers configured to run.")
