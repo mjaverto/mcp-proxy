@@ -27,6 +27,8 @@ from .supervised_backend import SupervisedBackend
 logger = logging.getLogger(__name__)
 
 DEFAULT_EXPOSE_HEADERS: Final[tuple[str, ...]] = ("mcp-session-id",)
+# stdio_client waits 2s for exit after closing stdin, then up to 2s more for SIGTERM/SIGKILL.
+BACKEND_SHUTDOWN_TIMEOUT_S: Final = 10.0
 
 
 def _default_expose_headers() -> list[str]:
@@ -170,10 +172,23 @@ async def run_mcp_server(  # noqa: C901
             # All http_session_managers' .run() are already entered into the stack
             yield
             logger.info("Main application lifespan shutting down...")
+            # Kill backends here, not after serve() returns: uvicorn re-raises SIGTERM as
+            # soon as it returns, so the process dies before the exit stack unwinds.
+            with anyio.move_on_after(BACKEND_SHUTDOWN_TIMEOUT_S):
+                async with anyio.create_task_group() as closing:
+                    for backend in _backends.values():
+                        closing.start_soon(backend.aclose)
 
         # Each stdio backend runs under its own supervisor task, which restarts it if it dies.
+        # Stop them rather than cancel the group, so each backend's process is actually
+        # killed (see SupervisedBackend.stop); the group then exits on its own.
         supervisors = await stack.enter_async_context(anyio.create_task_group())
-        stack.callback(supervisors.cancel_scope.cancel)  # runs before the group exits
+
+        def stop_backends() -> None:
+            for backend in _backends.values():
+                backend.stop()
+
+        stack.callback(stop_backends)
 
         backend_params = dict(named_server_params)
         if default_server_params:

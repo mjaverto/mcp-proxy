@@ -106,3 +106,21 @@ async def test_crashing_backend_does_not_affect_another(params: StdioServerParam
         await _pid(a)
         assert await _pid(b) == b_pid
         assert b.restarts == 0
+
+
+async def test_stop_kills_backend_that_outlives_stdin_eof(tmp_path: Path) -> None:
+    # Like `npx figma-console-mcp`: a wrapper process runs the real server as a child, and
+    # the server keeps running after stdin closes. stop() must kill the server, not just
+    # the wrapper, or it is orphaned holding its ports.
+    script = tmp_path / "lingering_server.py"
+    script.write_text(FAKE_SERVER + "import time\ntime.sleep(600)\n")
+    wrapped = StdioServerParameters(command="/bin/sh", args=["-c", f"'{sys.executable}' '{script}'; true"])
+    backend = SupervisedBackend("a", wrapped)
+    with anyio.fail_after(15):
+        async with anyio.create_task_group() as tg:
+            await tg.start(backend.run)
+            await backend.initialize()
+            pid = await _pid(backend)
+            backend.stop()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

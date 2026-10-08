@@ -48,6 +48,8 @@ class SupervisedBackend:
         self._session: ClientSession | None = None
         self._ready = anyio.Event()
         self._dead = anyio.Event()
+        self._stopping = False
+        self._finished = anyio.Event()
         self._scope = anyio.CancelScope()
 
     def status(self) -> dict[str, t.Any]:
@@ -55,30 +57,51 @@ class SupervisedBackend:
         return {"state": self.state, "restarts": self.restarts}
 
     def stop(self) -> None:
-        """Stop supervising: kill the backend and never restart it."""
+        """Stop supervising: shut the backend down and never restart it.
+
+        A live backend is ended by releasing its session wait, not by cancelling:
+        ``stdio_client``'s exit closes stdin, waits, then kills the process group,
+        and under cancellation that wait aborts before the kill. A backend that
+        ignores stdin EOF (figma-console keeps its WebSocket server up) would be
+        orphaned. Anything not yet up holds no session, so it is cancelled.
+        """
         self.state = "stopped"
-        self._scope.cancel()
+        self._stopping = True
+        if self._session is not None:
+            self._dead.set()
+        else:
+            self._scope.cancel()
+
+    async def aclose(self) -> None:
+        """``stop`` and wait until the backend process is gone."""
+        self.stop()
+        await self._finished.wait()
 
     async def run(self, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
         """Supervise until ``stop``. Signals ``task_status`` once the first attempt starts."""
         task_status.started()
         backoff = 1.0
-        with self._scope:
-            while True:
-                try:
-                    await self._serve_once()
-                    backoff = 1.0  # served until the process died: restart promptly
-                except Exception as exc:  # noqa: BLE001 - any failure to start is a transport failure
-                    logger.warning("Backend '%s' failed: %r", self.name, exc)
-                self._session = None
-                # Replace only a fired event; waiters on an unset one stay valid.
-                if self._ready.is_set():
-                    self._ready = anyio.Event()
-                self.state = "restarting"
-                self.restarts += 1
-                logger.warning("Restarting backend '%s' in %.0fs", self.name, backoff)
-                await anyio.sleep(backoff)
-                backoff = min(backoff * 2, BACKOFF_MAX_S)
+        try:
+            with self._scope:
+                while True:
+                    try:
+                        await self._serve_once()
+                        backoff = 1.0  # served until the process died: restart promptly
+                    except Exception as exc:  # noqa: BLE001 - any failure to start is a transport failure
+                        logger.warning("Backend '%s' failed: %r", self.name, exc)
+                    if self._stopping:
+                        return
+                    self._session = None
+                    # Replace only a fired event; waiters on an unset one stay valid.
+                    if self._ready.is_set():
+                        self._ready = anyio.Event()
+                    self.state = "restarting"
+                    self.restarts += 1
+                    logger.warning("Restarting backend '%s' in %.0fs", self.name, backoff)
+                    await anyio.sleep(backoff)
+                    backoff = min(backoff * 2, BACKOFF_MAX_S)
+        finally:
+            self._finished.set()
 
     async def _serve_once(self) -> None:
         self._dead = anyio.Event()
@@ -104,7 +127,8 @@ class SupervisedBackend:
                 self._ready.set()
                 logger.info("Backend '%s' is up", self.name)
                 await self._dead.wait()
-                logger.warning("Backend '%s' connection lost", self.name)
+                if not self._stopping:
+                    logger.warning("Backend '%s' connection lost", self.name)
                 self._session = None
                 self._ready = anyio.Event()
             tg.cancel_scope.cancel()
