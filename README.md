@@ -27,7 +27,7 @@
 
 ## Mike's fork
 
-Fork of [sparfenyuk/mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) (v0.12.0) that Mike runs locally. Default branch: `fix/supervise-stdio-backends`.
+Fork of [sparfenyuk/mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) (based on v0.13.0+) that Mike runs locally. Default branch: `fix/supervise-stdio-backends`. Upstream #248 (exit the whole proxy when a stdio server exits) is left out on purpose: the supervisor restarts that one backend instead.
 
 What changed:
 
@@ -41,7 +41,7 @@ What changed:
 
 How it runs: `uv tool install --force --editable ~/src/mcp-proxy-supervise --no-config --default-index https://pypi.org/simple`. The launchd job `com.mjaverto.mcp-proxy` starts it with `--named-server-config ~/.config/mcp-proxy/servers.json --port 9700 --pass-environment`. `~/.config/mcp-proxy/healthcheck.sh` restarts the proxy when it stops answering, or when a server that worked under this proxy fails two checks in a row. It also trims the logs to 10k lines once they pass 50 MB.
 
-Tests: `uv run --no-config pytest tests/test_supervised_backend.py`.
+Tests: `uv run --frozen --no-config pytest tests/test_supervised_backend.py` (`--frozen` keeps uv from rewriting `uv.lock` with a local package index).
 
 ## About
 
