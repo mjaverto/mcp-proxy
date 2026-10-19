@@ -231,7 +231,7 @@ async def _fake_run(_self: object, *, task_status: t.Any = None) -> None:  # noq
 
 
 def setup_async_context_mocks() -> tuple[
-    contextlib.AbstractContextManager[tuple[AsyncMock, AsyncMock]],
+    contextlib.AbstractContextManager[tuple[t.Any, AsyncMock]],
     contextlib.AbstractContextManager[tuple[AsyncMock, AsyncMock]],
     AsyncMock,
     MagicMock,
