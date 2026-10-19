@@ -45,7 +45,7 @@ mcp-proxy = "mcp_proxy.__main__:main"
 mcp-reverse-proxy = "mcp_proxy.__main__:client"
 
 [tool.setuptools.package-data]
-"*" = ["py.typed"]
+"*" = ["py.typed", "dashboard.html"]
 
 [dependency-groups]
 dev = [

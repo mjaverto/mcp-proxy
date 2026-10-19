@@ -1,7 +1,9 @@
 """Create a local SSE server that proxies requests to a stdio MCP server."""
 
 import contextlib
+import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -19,9 +21,11 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import BaseRoute, Mount, Route
+from starlette.routing import BaseRoute, Mount, Route, Router
 from starlette.types import Receive, Scope, Send
 
+from .dashboard import DashboardState, start_dashboard
+from .metrics import build_snapshot, match_token, proxy_rss_mb, sample_memory_mb
 from .proxy_server import create_proxy_server
 from .supervised_backend import SupervisedBackend
 
@@ -32,6 +36,7 @@ DEFAULT_EXPOSE_HEADERS: Final[tuple[str, ...]] = ("mcp-session-id",)
 BACKEND_SHUTDOWN_TIMEOUT_S: Final = 10.0
 # How long to wait for backends before serving; slower ones are mounted when they come up.
 STARTUP_GRACE_S: Final = 15.0
+METRICS_INTERVAL_S: Final = 5.0
 
 
 def _default_expose_headers() -> list[str]:
@@ -48,6 +53,7 @@ class MCPServerSettings:
     allow_origins: list[str] | None = None
     expose_headers: list[str] = field(default_factory=_default_expose_headers)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    dashboard_port: int | None = None
 
 
 # To store last activity for multiple servers if needed, though status endpoint is global for now.
@@ -85,6 +91,24 @@ async def _handle_status(_: Request) -> Response:
 async def _handle_healthz(_: Request) -> Response:
     """Respond to a transport liveness probe without allocating an MCP session."""
     return Response(status_code=204)
+
+
+class ClientTracker:
+    """Pure ASGI wrapper that records which MCP sessions talk to a backend."""
+
+    def __init__(self, app: Any, backend: SupervisedBackend) -> None:  # noqa: ANN401
+        """Wrap ``app``; sessions seen are recorded on ``backend.stats``."""
+        self._app = app
+        self._backend = backend
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Record the session id of the request, then pass it on."""
+        if scope["type"] == "http":
+            headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
+            session_id = headers.get("mcp-session-id")
+            if session_id:
+                self._backend.stats.note_client(session_id, headers.get("user-agent"))
+        await self._app(scope, receive, send)
 
 
 LOOPBACK_HOSTS: Final[tuple[str, ...]] = ("127.0.0.1", "localhost", "::1")
@@ -285,9 +309,32 @@ async def run_mcp_server(  # noqa: C901, PLR0915
                 if name == "default" and default_server_params:
                     starlette_app.router.routes.extend(routes)
                 else:
-                    starlette_app.router.routes.append(Mount(f"/servers/{name}", routes=routes))
+                    tracked = ClientTracker(
+                        Router(routes=routes, redirect_slashes=False), _backends[name]
+                    )
+                    starlette_app.router.routes.append(Mount(f"/servers/{name}", app=tracked))
                 mounted.set()
                 await anyio.sleep_forever()
+
+        started_at = time.time()
+        dashboard_state = DashboardState()
+
+        async def sample_metrics() -> None:
+            """Refresh memory samples and the dashboard snapshot every few seconds."""
+            while True:
+                tokens = {
+                    n: match_token(p.command, list(p.args)) for n, p in backend_params.items()
+                }
+                memory = await anyio.to_thread.run_sync(sample_memory_mb, tokens)
+                proxy_mb = await anyio.to_thread.run_sync(proxy_rss_mb)
+                for name, backend in _backends.items():
+                    mb = memory.get(name)
+                    backend.stats.memory_mb = mb
+                    if mb is not None:
+                        backend.stats.memory_history.append(mb)
+                snapshot = build_snapshot(_backends.values(), started_at, proxy_mb)
+                dashboard_state.snapshot_json = json.dumps(snapshot).encode()
+                await anyio.sleep(METRICS_INTERVAL_S)
 
         backend_params = dict(named_server_params)
         if default_server_params:
@@ -339,4 +386,10 @@ async def run_mcp_server(  # noqa: C901, PLR0915
             mcp_settings.bind_host,
             mcp_settings.port,
         )
+        mounts.start_soon(sample_metrics)
+        if mcp_settings.dashboard_port is not None:
+            dashboard = start_dashboard(
+                mcp_settings.bind_host, mcp_settings.dashboard_port, dashboard_state
+            )
+            stack.callback(dashboard.shutdown)
         await http_server.serve()

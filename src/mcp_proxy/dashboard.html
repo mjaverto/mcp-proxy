@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp-proxy</title>
+<!-- Pico gives the base typography and form reset; Tailwind and shadcn tokens style the components. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.classless.min.css">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      colors: {
+        border: "hsl(var(--border))", background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))", muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
+        card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
+        primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
+        success: "hsl(var(--success))", warning: "hsl(var(--warning))", destructive: "hsl(var(--destructive))",
+      },
+      borderRadius: { lg: "var(--radius)", md: "calc(var(--radius) - 2px)", sm: "calc(var(--radius) - 4px)" },
+      fontFamily: { sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "sans-serif"], mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"] },
+    } },
+  };
+</script>
+<style>
+  /* shadcn/ui "zinc" dark theme tokens */
+  :root {
+    --background: 240 10% 3.9%; --foreground: 0 0% 98%;
+    --card: 240 10% 5.5%; --card-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%; --muted-foreground: 240 5% 64.9%;
+    --border: 240 3.7% 15.9%; --primary: 0 0% 98%; --primary-foreground: 240 5.9% 10%;
+    --success: 142 71% 45%; --warning: 38 92% 50%; --destructive: 0 72% 51%;
+    --radius: 0.6rem;
+    --pico-font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --pico-background-color: hsl(var(--background));
+    --pico-color: hsl(var(--foreground));
+  }
+  body { background: hsl(var(--background)); color: hsl(var(--foreground)); margin: 0; padding: 0; }
+  main, header, section, article { padding: 0; margin: 0; }
+  table { margin: 0; --pico-border-color: hsl(var(--border)); }
+  th, td { background: transparent; border-bottom: 1px solid hsl(var(--border)); padding: .75rem 1rem; }
+  progress { display: none; }
+  .tnum { font-variant-numeric: tabular-nums; }
+  @keyframes pulse-dot { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .live-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  .glow { background: radial-gradient(60% 60% at 50% 0%, hsl(var(--success) / .12), transparent 70%); }
+</style>
+</head>
+<body class="font-sans antialiased">
+<main class="mx-auto max-w-6xl px-6 py-10">
+  <!-- header -->
+  <header class="flex flex-wrap items-center justify-between gap-4 pb-8">
+    <div class="flex items-center gap-3">
+      <div class="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card">
+        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>
+      </div>
+      <div>
+        <h1 class="m-0 text-xl font-semibold tracking-tight">mcp-proxy</h1>
+        <p class="m-0 text-sm text-muted-foreground">One shared copy of every MCP server</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground">
+      <span id="live" class="h-2 w-2 rounded-full bg-muted-foreground"></span>
+      <span id="updated">connecting…</span>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="glow relative overflow-hidden rounded-xl border border-border bg-card p-8">
+    <p class="m-0 text-sm font-medium text-muted-foreground">Memory the proxy is keeping off your Mac</p>
+    <div class="mt-2 flex flex-wrap items-baseline gap-3">
+      <span id="avoided" class="tnum text-6xl font-semibold tracking-tight">–</span>
+      <span class="text-2xl text-muted-foreground">MB</span>
+    </div>
+    <p id="hero-sub" class="mt-3 max-w-2xl text-sm text-muted-foreground">Waiting for data…</p>
+  </section>
+
+  <!-- stat cards -->
+  <section class="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4" id="stats"></section>
+
+  <!-- shared vs separate -->
+  <section class="mt-6 rounded-xl border border-border bg-card">
+    <div class="border-b border-border px-6 py-4">
+      <h2 class="m-0 text-base font-semibold">Shared copy vs one copy per client</h2>
+      <p class="m-0 mt-1 text-sm text-muted-foreground">Bars show resident memory. The lighter bar is what separate copies would use for the clients connected now (estimate).</p>
+    </div>
+    <div id="bars" class="space-y-4 px-6 py-5"></div>
+  </section>
+
+  <!-- backends table -->
+  <section class="mt-6 overflow-hidden rounded-xl border border-border bg-card">
+    <div class="border-b border-border px-6 py-4">
+      <h2 class="m-0 text-base font-semibold">Backends</h2>
+      <p class="m-0 mt-1 text-sm text-muted-foreground">Each runs once. A crashed backend restarts on its own; the others keep serving.</p>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs uppercase tracking-wide text-muted-foreground">
+            <th>Server</th><th>Status</th><th>Uptime</th><th>Memory</th><th class="text-right">Clients</th><th class="text-right">Tool calls</th><th class="text-right">p95</th><th class="text-right">Errors</th><th class="text-right">Restarts</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="mt-8 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
+    <span id="proxy-line">proxy</span>
+    <span>Counters reset when the proxy restarts. Clients are MCP sessions seen in the last 10 minutes, excluding curl health checks.</span>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtDur = (s) => { if (s == null) return "–"; const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s%60}s` : `${s}s`; };
+const fmtNum = (n) => n == null ? "–" : n.toLocaleString();
+const fmtMB = (n) => n == null ? "–" : n >= 1024 ? (n/1024).toFixed(2) + " GB" : Math.round(n) + " MB";
+
+const badge = (state) => {
+  const m = { up: ["bg-success/15 text-success border-success/30", "Running"], restarting: ["bg-warning/15 text-warning border-warning/30", "Restarting"],
+              starting: ["bg-muted text-muted-foreground border-border", "Starting"], stopped: ["bg-destructive/15 text-destructive border-destructive/30", "Stopped"] };
+  const [cls, label] = m[state] || m.starting;
+  return `<span class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${cls}"><span class="h-1.5 w-1.5 rounded-full bg-current ${state==='up'?'live-dot':''}"></span>${label}</span>`;
+};
+
+const spark = (pts) => {
+  if (!pts || pts.length < 2) return `<span class="text-muted-foreground">–</span>`;
+  const w = 72, h = 22, max = Math.max(...pts), min = Math.min(...pts), span = Math.max(max - min, 1);
+  const d = pts.map((v, i) => `${i ? "L" : "M"}${(i/(pts.length-1)*w).toFixed(1)},${(h - 2 - (v-min)/span*(h-4)).toFixed(1)}`).join(" ");
+  return `<svg width="${w}" height="${h}" class="text-muted-foreground"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+};
+
+const statCard = (label, value, sub) => `
+  <article class="rounded-xl border border-border bg-card p-5">
+    <p class="m-0 text-sm text-muted-foreground">${label}</p>
+    <p class="tnum m-0 mt-2 text-3xl font-semibold tracking-tight">${value}</p>
+    <p class="m-0 mt-1 text-xs text-muted-foreground">${sub}</p>
+  </article>`;
+
+function render(d) {
+  const t = d.totals, n = t.clients_active;
+  $("avoided").textContent = t.memory_avoided_mb >= 1024 ? (t.memory_avoided_mb/1024).toFixed(2) : Math.round(t.memory_avoided_mb);
+  document.querySelector("#avoided + span").textContent = t.memory_avoided_mb >= 1024 ? "GB" : "MB";
+  $("hero-sub").textContent = n > 1
+    ? `${n} clients are sharing one copy of each of ${t.backends} servers. Separate copies could have held up to ${fmtMB(t.memory_avoided_mb)} more. This is an upper-bound estimate: it assumes every client would start its own copy of every server, and the client count is capped at the typical count across servers so reconnects don't inflate it.`
+    : n === 1 ? `1 client connected. The saving grows with every extra client, because each would otherwise start its own copy of every server.`
+    : `No clients seen yet. The saving grows with every client that connects.`;
+
+  $("stats").innerHTML =
+    statCard("Servers running", `${t.up}<span class="text-muted-foreground"> / ${t.backends}</span>`, "each started once") +
+    statCard("Memory held", fmtMB(t.memory_mb), `shared copies · proxy itself ${fmtMB(d.proxy.memory_mb)}`) +
+    statCard("Tool calls served", fmtNum(t.tool_calls), `${fmtNum(t.errors)} errors across ${fmtNum(t.calls)} requests`) +
+    statCard("Auto-restarts", fmtNum(t.restarts), "crashes recovered without intervention");
+
+  $("bars").innerHTML = d.backends.filter(b => b.memory_mb != null).map(b => {
+    const copies = Math.max(b.clients_effective, 1), alone = b.memory_mb * copies;
+    const maxAll = Math.max(...d.backends.map(x => (x.memory_mb || 0) * Math.max(x.clients_effective, 1)), 1);
+    return `<div>
+      <div class="mb-1.5 flex justify-between text-sm"><span class="font-medium">${b.name}</span>
+        <span class="tnum text-muted-foreground">${fmtMB(b.memory_mb)} shared${copies > 1 ? ` · ${fmtMB(alone)} as ${copies} copies` : ""}</span></div>
+      <div class="relative h-2.5 overflow-hidden rounded-full bg-muted">
+        <div class="absolute inset-y-0 left-0 rounded-full bg-foreground/25" style="width:${(alone/maxAll*100).toFixed(1)}%"></div>
+        <div class="absolute inset-y-0 left-0 rounded-full bg-success" style="width:${(b.memory_mb/maxAll*100).toFixed(1)}%"></div>
+      </div></div>`;
+  }).join("") || `<p class="m-0 text-sm text-muted-foreground">Memory samples appear after a few seconds.</p>`;
+
+  $("rows").innerHTML = d.backends.map(b => `
+    <tr class="hover:bg-muted/40">
+      <td class="font-medium">${b.name}</td>
+      <td>${badge(b.state)}</td>
+      <td class="tnum text-muted-foreground">${fmtDur(b.uptime_s)}</td>
+      <td><div class="flex items-center gap-3"><span class="tnum w-16">${fmtMB(b.memory_mb)}</span>${spark(b.memory_history)}</div></td>
+      <td class="tnum text-right">${b.clients_active}</td>
+      <td class="tnum text-right">${fmtNum(b.tool_calls)}</td>
+      <td class="tnum text-right text-muted-foreground">${b.p95_ms == null ? "–" : b.p95_ms < 1000 ? Math.round(b.p95_ms) + " ms" : (b.p95_ms/1000).toFixed(1) + " s"}</td>
+      <td class="tnum text-right ${b.errors ? "text-warning" : "text-muted-foreground"}">${fmtNum(b.errors)}</td>
+      <td class="tnum text-right ${b.restarts ? "text-warning" : "text-muted-foreground"}">${fmtNum(b.restarts)}</td>
+    </tr>`).join("");
+
+  $("proxy-line").textContent = `proxy up ${fmtDur(d.proxy.uptime_s)} · since ${new Date(d.proxy.started_at).toLocaleString()}`;
+}
+
+let lastOk = 0;
+async function tick() {
+  try {
+    const r = await fetch("/api/metrics", { cache: "no-store" });
+    const d = await r.json();
+    if (d.totals) { render(d); lastOk = Date.now(); }
+  } catch (e) { /* keep last view; the status pill shows staleness */ }
+  const age = Math.round((Date.now() - lastOk) / 1000);
+  const fresh = lastOk && age < 15;
+  $("live").className = "h-2 w-2 rounded-full " + (fresh ? "bg-success live-dot" : "bg-destructive");
+  $("updated").textContent = lastOk ? (fresh ? "live · updated " + age + "s ago" : "offline · last update " + fmtDur(age) + " ago") : "connecting…";
+}
+tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

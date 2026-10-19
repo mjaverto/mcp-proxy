@@ -8,6 +8,7 @@ restart.
 """
 
 import logging
+import time
 import typing as t
 
 import anyio
@@ -16,6 +17,8 @@ from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.message import SessionMessage
+
+from .metrics import BackendStats
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class SupervisedBackend:
         self.init_result: types.InitializeResult | None = None
         self.restarts = 0
         self.state = "starting"
+        self.stats = BackendStats()
         self._session: ClientSession | None = None
         self._ready = anyio.Event()
         self._dead = anyio.Event()
@@ -136,6 +140,7 @@ class SupervisedBackend:
                             self.init_result = result
                         self._session = session
                         self.state = "up"
+                        self.stats.up_since = time.time()
                         self._ready.set()
                         logger.info("Backend '%s' is up", self.name)
                         await self._dead.wait()
@@ -164,11 +169,16 @@ class SupervisedBackend:
 
         async def forward(*args: t.Any, **kwargs: t.Any) -> t.Any:  # noqa: ANN401
             session = await self._live_session()
+            started = time.monotonic()
+            failed = False
             try:
                 return await getattr(session, method)(*args, **kwargs)
             except Exception as exc:
+                failed = True
                 if _is_transport_error(exc):
                     self._dead.set()
                 raise
+            finally:
+                self.stats.record_call(method, time.monotonic() - started, failed=failed)
 
         return forward

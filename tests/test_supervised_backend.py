@@ -119,6 +119,16 @@ async def test_minus_32000_from_live_backend_does_not_restart(
         assert a.restarts == 0
 
 
+async def test_calls_and_errors_are_counted(params: StdioServerParameters) -> None:
+    async with two_backends(params) as (a, _):
+        await _pid(a)
+        with pytest.raises(McpError):
+            await a.list_resources()
+        assert a.stats.tool_calls == 1
+        assert a.stats.errors == 1
+        assert a.stats.up_since is not None
+
+
 async def test_crashing_backend_does_not_affect_another(params: StdioServerParameters) -> None:
     async with two_backends(params) as (a, b):
         b_pid = await _pid(b)

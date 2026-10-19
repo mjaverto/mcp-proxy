@@ -255,6 +255,12 @@ def _add_arguments_to_parser(parser: argparse.ArgumentParser) -> None:
         help="Host to expose an SSE server on. Default is 127.0.0.1",
     )
     mcp_server_group.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=None,
+        help="Serve a read-only status dashboard on this port (same host). Off by default.",
+    )
+    mcp_server_group.add_argument(
         "--stateless",
         action=argparse.BooleanOptionalAction,
         help="Enable stateless mode for streamable http transports. Default is False",
@@ -469,6 +475,7 @@ def _create_mcp_settings(args_parsed: argparse.Namespace) -> MCPServerSettings:
         allow_origins=args_parsed.allow_origin if len(args_parsed.allow_origin) > 0 else None,
         expose_headers=expose_headers,
         log_level="DEBUG" if args_parsed.debug else args_parsed.log_level,
+        dashboard_port=args_parsed.dashboard_port,
     )
 
 
