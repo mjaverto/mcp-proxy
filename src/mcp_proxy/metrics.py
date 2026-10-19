@@ -6,7 +6,6 @@ arguments are never exposed: they can hold registry URLs and tokens.
 
 import os
 import re
-import statistics
 import subprocess
 import time
 import typing as t
@@ -190,15 +189,8 @@ def build_snapshot(
             }
         )
     held = sum(r["memory_mb"] or 0 for r in rows)
-    # A client that reconnects leaves its old session behind for a while, so one backend can
-    # show far more sessions than the others. Cap each at the typical count among backends
-    # that have any, so the estimate is not driven by reconnect noise.
-    seen = [r["clients_active"] for r in rows if r["clients_active"] > 0]
-    cap = int(statistics.median(seen)) if seen else 0
-    for r in rows:
-        r["clients_effective"] = min(r["clients_active"], cap)
     # If each extra client had started its own copy, they would hold this much more.
-    avoided = sum((r["memory_mb"] or 0) * max(r["clients_effective"] - 1, 0) for r in rows)
+    avoided = sum((r["memory_mb"] or 0) * max(r["clients_active"] - 1, 0) for r in rows)
     return {
         "now": _iso(now),
         "proxy": {
@@ -214,7 +206,7 @@ def build_snapshot(
             "tool_calls": sum(r["tool_calls"] for r in rows),
             "errors": sum(r["errors"] for r in rows),
             "memory_mb": round(held, 1),
-            "clients_active": cap,
+            "clients_active": max((r["clients_active"] for r in rows), default=0),
             "memory_avoided_mb": round(avoided, 1),
         },
         "backends": rows,

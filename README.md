@@ -41,7 +41,7 @@ What changed:
 
 How it runs: `uv tool install --force --editable ~/src/mcp-proxy-supervise --no-config --default-index https://pypi.org/simple`. The launchd job `com.mjaverto.mcp-proxy` starts it with `--named-server-config ~/.config/mcp-proxy/servers.json --port 9700 --pass-environment`. `~/.config/mcp-proxy/healthcheck.sh` restarts the proxy when it stops answering, or when a server that worked under this proxy fails two checks in a row. It also trims the logs to 10k lines once they pass 50 MB.
 
-Dashboard: start with `--dashboard-port 47190` (any free port; off by default) and open `http://127.0.0.1:47190/`. It is a read-only page served from the standard library in a daemon thread, showing memory held by each shared backend, an upper-bound estimate of the memory saved versus one copy per client, tool-call counts and latency, and auto-restarts. It rejects requests whose Host isn't loopback. It loads Tailwind and Pico CSS from CDNs.
+Dashboard: start with `--dashboard-port 47190` (any free port; off by default) and open `http://127.0.0.1:47190/`. It is a read-only page served from the standard library in a daemon thread, showing memory held by each shared backend, an estimate of the memory saved versus one copy per client (it assumes every client would otherwise start its own copy of every server), tool-call counts and latency, and auto-restarts. It rejects requests whose Host isn't loopback. It loads Tailwind and Pico CSS from CDNs.
 
 Tests: `uv run --frozen --no-config pytest tests/test_supervised_backend.py` (`--frozen` keeps uv from rewriting `uv.lock` with a local package index).
 

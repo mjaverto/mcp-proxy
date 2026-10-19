@@ -93,6 +93,30 @@ async def _handle_healthz(_: Request) -> Response:
     return Response(status_code=204)
 
 
+async def metrics_loop(
+    backend_params: dict[str, StdioServerParameters],
+    started_at: float,
+    state: DashboardState,
+    interval_s: float = METRICS_INTERVAL_S,
+) -> None:
+    """Refresh memory samples and the dashboard snapshot. Never raises: telemetry is best effort."""
+    while True:
+        try:
+            tokens = {n: match_token(p.command, list(p.args)) for n, p in backend_params.items()}
+            memory = await anyio.to_thread.run_sync(sample_memory_mb, tokens)
+            proxy_mb = await anyio.to_thread.run_sync(proxy_rss_mb)
+            for name, backend in _backends.items():
+                mb = memory.get(name)
+                backend.stats.memory_mb = mb
+                if mb is not None:
+                    backend.stats.memory_history.append(mb)
+            snapshot = build_snapshot(_backends.values(), started_at, proxy_mb)
+            state.snapshot_json = json.dumps(snapshot).encode()
+        except Exception:
+            logger.warning("Dashboard sampling failed; keeping the last snapshot", exc_info=True)
+        await anyio.sleep(interval_s)
+
+
 class ClientTracker:
     """Pure ASGI wrapper that records which MCP sessions talk to a backend."""
 
@@ -318,24 +342,6 @@ async def run_mcp_server(  # noqa: C901, PLR0915
 
         started_at = time.time()
         dashboard_state = DashboardState()
-
-        async def sample_metrics() -> None:
-            """Refresh memory samples and the dashboard snapshot every few seconds."""
-            while True:
-                tokens = {
-                    n: match_token(p.command, list(p.args)) for n, p in backend_params.items()
-                }
-                memory = await anyio.to_thread.run_sync(sample_memory_mb, tokens)
-                proxy_mb = await anyio.to_thread.run_sync(proxy_rss_mb)
-                for name, backend in _backends.items():
-                    mb = memory.get(name)
-                    backend.stats.memory_mb = mb
-                    if mb is not None:
-                        backend.stats.memory_history.append(mb)
-                snapshot = build_snapshot(_backends.values(), started_at, proxy_mb)
-                dashboard_state.snapshot_json = json.dumps(snapshot).encode()
-                await anyio.sleep(METRICS_INTERVAL_S)
-
         backend_params = dict(named_server_params)
         if default_server_params:
             backend_params = {"default": default_server_params, **backend_params}
@@ -386,8 +392,8 @@ async def run_mcp_server(  # noqa: C901, PLR0915
             mcp_settings.bind_host,
             mcp_settings.port,
         )
-        mounts.start_soon(sample_metrics)
         if mcp_settings.dashboard_port is not None:
+            mounts.start_soon(metrics_loop, backend_params, started_at, dashboard_state)
             dashboard = start_dashboard(
                 mcp_settings.bind_host, mcp_settings.dashboard_port, dashboard_state
             )

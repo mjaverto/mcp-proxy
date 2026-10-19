@@ -7,9 +7,12 @@ import time
 from http import HTTPStatus
 from http.client import HTTPConnection
 
+import anyio
 import pytest
 
+from mcp_proxy import mcp_server
 from mcp_proxy.dashboard import DashboardState, start_dashboard
+from mcp_proxy.mcp_server import metrics_loop
 from mcp_proxy.metrics import BackendStats, build_snapshot, match_token
 
 
@@ -25,25 +28,32 @@ class FakeBackend:  # noqa: D101
 
 def test_memory_avoided_counts_only_the_extra_clients() -> None:
     snap = build_snapshot(
-        [FakeBackend("a", 100.0, 3), FakeBackend("b", 50.0, 3), FakeBackend("c", 10.0, 1)],
+        [FakeBackend("a", 100.0, 26), FakeBackend("b", 50.0, 4), FakeBackend("c", 10.0, 0)],
         started_at=time.time() - 10,
         proxy_mb=40.0,
     )
     assert snap["totals"]["memory_mb"] == 160.0  # noqa: PLR2004
-    assert snap["totals"]["clients_active"] == 3  # noqa: PLR2004
-    assert snap["totals"]["memory_avoided_mb"] == 300.0  # noqa: PLR2004  (3 clients: 100+50 x 2)
+    assert snap["totals"]["clients_active"] == 26  # noqa: PLR2004
+    assert snap["totals"]["memory_avoided_mb"] == 2650.0  # noqa: PLR2004  (100 x 25 + 50 x 3)
 
 
-def test_one_backend_with_reconnect_noise_does_not_drive_the_estimate() -> None:
-    snap = build_snapshot(
-        [FakeBackend("a", 100.0, 26), FakeBackend("b", 50.0, 4), FakeBackend("c", 10.0, 4)],
-        started_at=time.time() - 10,
-        proxy_mb=40.0,
-    )
-    by_name = {b["name"]: b for b in snap["backends"]}
-    assert by_name["a"]["clients_active"] == 26  # noqa: PLR2004  (table shows the raw count)
-    assert by_name["a"]["clients_effective"] == 4  # noqa: PLR2004
-    assert snap["totals"]["memory_avoided_mb"] == 480.0  # noqa: PLR2004  (160 MB x 3 extra)
+@pytest.mark.asyncio
+async def test_sampling_failure_does_not_stop_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def explode(_tokens: dict[str, str]) -> dict[str, float]:
+        nonlocal calls
+        calls += 1
+        msg = "ps timed out"
+        raise TimeoutError(msg)
+
+    monkeypatch.setattr(mcp_server, "sample_memory_mb", explode)
+    state = DashboardState()
+    state.snapshot_json = b'{"keep": true}'
+    with anyio.move_on_after(0.3):
+        await metrics_loop({}, time.time(), state, interval_s=0.02)
+    assert calls > 1  # kept retrying after the first failure
+    assert state.snapshot_json == b'{"keep": true}'
 
 
 def test_curl_probes_are_not_counted_as_clients() -> None:

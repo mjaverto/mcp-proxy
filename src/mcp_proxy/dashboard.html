@@ -145,7 +145,7 @@ function render(d) {
   $("avoided").textContent = t.memory_avoided_mb >= 1024 ? (t.memory_avoided_mb/1024).toFixed(2) : Math.round(t.memory_avoided_mb);
   document.querySelector("#avoided + span").textContent = t.memory_avoided_mb >= 1024 ? "GB" : "MB";
   $("hero-sub").textContent = n > 1
-    ? `${n} clients are sharing one copy of each of ${t.backends} servers. Separate copies could have held up to ${fmtMB(t.memory_avoided_mb)} more. This is an upper-bound estimate: it assumes every client would start its own copy of every server, and the client count is capped at the typical count across servers so reconnects don't inflate it.`
+    ? `Up to ${n} clients are sharing one copy of each server. Separate copies would hold about ${fmtMB(t.memory_avoided_mb)} more. This is an estimate: it assumes every client would otherwise start its own copy of every server, and counts MCP sessions seen in the last 10 minutes.`
     : n === 1 ? `1 client connected. The saving grows with every extra client, because each would otherwise start its own copy of every server.`
     : `No clients seen yet. The saving grows with every client that connects.`;
 
@@ -156,8 +156,8 @@ function render(d) {
     statCard("Auto-restarts", fmtNum(t.restarts), "crashes recovered without intervention");
 
   $("bars").innerHTML = d.backends.filter(b => b.memory_mb != null).map(b => {
-    const copies = Math.max(b.clients_effective, 1), alone = b.memory_mb * copies;
-    const maxAll = Math.max(...d.backends.map(x => (x.memory_mb || 0) * Math.max(x.clients_effective, 1)), 1);
+    const copies = Math.max(b.clients_active, 1), alone = b.memory_mb * copies;
+    const maxAll = Math.max(...d.backends.map(x => (x.memory_mb || 0) * Math.max(x.clients_active, 1)), 1);
     return `<div>
       <div class="mb-1.5 flex justify-between text-sm"><span class="font-medium">${b.name}</span>
         <span class="tnum text-muted-foreground">${fmtMB(b.memory_mb)} shared${copies > 1 ? ` · ${fmtMB(alone)} as ${copies} copies` : ""}</span></div>
