@@ -34,11 +34,12 @@ What changed:
 - Each stdio backend runs under its own supervisor task (`src/mcp_proxy/supervised_backend.py`). That task opens and closes the backend's `stdio_client` and `ClientSession` itself.
 - When a backend process exits or its pipe closes, the supervisor restarts it with backoff (1s up to 30s). The HTTP endpoint and client sessions stay up.
 - JSON-RPC errors (for example `Method not found` on `resources/list`) go back to the client. They never trigger a restart.
-- A backend that crashes doesn't affect the others. A backend that never starts (60s) is logged, left unserved, and doesn't block the rest.
+- A backend that crashes doesn't affect the others. The proxy starts serving within about 15s. A backend that is still starting then gets its `/servers/<name>/` routes when it first comes up; until then its URL returns 404.
+- On shutdown, each backend's process group is killed, so wrappers like `npx` don't leave orphans holding ports.
 - `/status` shows each backend's `state` (`up`, `restarting`, `stopped`) and `restarts` count.
 - `mcp>=1.27.1,<2` (mcp 2.0 breaks the proxy).
 
-How it runs: `uv tool install --force --editable ~/src/mcp-proxy-supervise --no-config --default-index https://pypi.org/simple`. The launchd job `com.mjaverto.mcp-proxy` starts it with `--named-server-config ~/.config/mcp-proxy/servers.json --port 9700 --pass-environment`. `~/.config/mcp-proxy/healthcheck.sh` restarts the proxy when a server fails two checks in a row, and trims the logs to 10k lines once they pass 50 MB.
+How it runs: `uv tool install --force --editable ~/src/mcp-proxy-supervise --no-config --default-index https://pypi.org/simple`. The launchd job `com.mjaverto.mcp-proxy` starts it with `--named-server-config ~/.config/mcp-proxy/servers.json --port 9700 --pass-environment`. `~/.config/mcp-proxy/healthcheck.sh` restarts the proxy when it stops answering, or when a server that worked under this proxy fails two checks in a row. It also trims the logs to 10k lines once they pass 50 MB.
 
 Tests: `uv run --no-config pytest tests/test_supervised_backend.py`.
 

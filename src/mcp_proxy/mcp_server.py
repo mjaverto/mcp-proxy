@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_EXPOSE_HEADERS: Final[tuple[str, ...]] = ("mcp-session-id",)
 # stdio_client waits 2s for exit after closing stdin, then up to 2s more for SIGTERM/SIGKILL.
 BACKEND_SHUTDOWN_TIMEOUT_S: Final = 10.0
+# How long to wait for backends before serving; slower ones are mounted when they come up.
+STARTUP_GRACE_S: Final = 15.0
 
 
 def _default_expose_headers() -> list[str]:
@@ -151,7 +153,7 @@ def create_single_instance_routes(
     return routes, http_session_manager
 
 
-async def run_mcp_server(  # noqa: C901
+async def run_mcp_server(  # noqa: C901, PLR0915
     mcp_settings: MCPServerSettings,
     default_server_params: StdioServerParameters | None = None,
     named_server_params: dict[str, StdioServerParameters] | None = None,
@@ -159,6 +161,9 @@ async def run_mcp_server(  # noqa: C901
     """Run stdio client(s) and expose an MCP server with multiple possible backends."""
     if named_server_params is None:
         named_server_params = {}
+    if not default_server_params and not named_server_params:
+        logger.error("No servers configured to run.")
+        return
 
     all_routes: list[BaseRoute] = [
         Route("/status", endpoint=_handle_status),  # Global status endpoint
@@ -169,7 +174,7 @@ async def run_mcp_server(  # noqa: C901
         @contextlib.asynccontextmanager
         async def combined_lifespan(_app: Starlette) -> AsyncIterator[None]:
             logger.info("Main application lifespan starting...")
-            # All http_session_managers' .run() are already entered into the stack
+            # Each backend's session manager runs inside its serve_backend task.
             yield
             logger.info("Main application lifespan shutting down...")
             # Kill backends here, not after serve() returns: uvicorn re-raises SIGTERM as
@@ -189,39 +194,6 @@ async def run_mcp_server(  # noqa: C901
                 backend.stop()
 
         stack.callback(stop_backends)
-
-        backend_params = dict(named_server_params)
-        if default_server_params:
-            backend_params = {"default": default_server_params, **backend_params}
-
-        # Start every backend first so slow or broken ones start in parallel.
-        for name, params in backend_params.items():
-            logger.info(
-                "Setting up server '%s': %s %s", name, params.command, " ".join(params.args)
-            )
-            _backends[name] = SupervisedBackend(name, params)
-            await supervisors.start(_backends[name].run)
-
-        for name in backend_params:
-            try:
-                proxy = await create_proxy_server(_backends[name])  # type: ignore[arg-type]
-            except TimeoutError:
-                logger.error("Server '%s' did not start; not serving it", name)  # noqa: TRY400
-                _backends[name].stop()
-                continue
-            routes, http_manager = create_single_instance_routes(
-                proxy,
-                stateless_instance=mcp_settings.stateless,
-            )
-            await stack.enter_async_context(http_manager.run())
-            if name == "default" and default_server_params:
-                all_routes.extend(routes)
-            else:
-                all_routes.append(Mount(f"/servers/{name}", routes=routes))
-
-        if not default_server_params and not named_server_params:
-            logger.error("No servers configured to run.")
-            return
 
         middleware: list[Middleware] = []
         if mcp_settings.allow_origins:
@@ -243,6 +215,49 @@ async def run_mcp_server(  # noqa: C901
         )
 
         starlette_app.router.redirect_slashes = False
+
+        # Mount tasks run until shutdown; cancel them before the backends stop.
+        mounts = await stack.enter_async_context(anyio.create_task_group())
+        stack.callback(mounts.cancel_scope.cancel)
+
+        async def serve_backend(name: str, mounted: anyio.Event) -> None:
+            """Mount a backend once it first comes up. A slow one never blocks the rest."""
+            while True:
+                try:
+                    proxy = await create_proxy_server(_backends[name])  # type: ignore[arg-type]
+                    break
+                except TimeoutError:
+                    logger.warning("Server '%s' not up yet; serving the others meanwhile", name)
+            routes, http_manager = create_single_instance_routes(
+                proxy,
+                stateless_instance=mcp_settings.stateless,
+            )
+            async with http_manager.run():
+                if name == "default" and default_server_params:
+                    starlette_app.router.routes.extend(routes)
+                else:
+                    starlette_app.router.routes.append(Mount(f"/servers/{name}", routes=routes))
+                mounted.set()
+                await anyio.sleep_forever()
+
+        backend_params = dict(named_server_params)
+        if default_server_params:
+            backend_params = {"default": default_server_params, **backend_params}
+
+        mounted: list[anyio.Event] = []
+        for name, params in backend_params.items():
+            logger.info(
+                "Setting up server '%s': %s %s", name, params.command, " ".join(params.args)
+            )
+            _backends[name] = SupervisedBackend(name, params)
+            await supervisors.start(_backends[name].run)
+            mounted.append(anyio.Event())
+            mounts.start_soon(serve_backend, name, mounted[-1])
+
+        # Give fast backends a moment so the first requests after a restart find them.
+        with anyio.move_on_after(STARTUP_GRACE_S):
+            for event in mounted:
+                await event.wait()
 
         config = uvicorn.Config(
             starlette_app,

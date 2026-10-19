@@ -4,16 +4,21 @@
 import contextlib
 import os
 import signal
+import socket
 import sys
 import textwrap
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import anyio
+import httpx
 import pytest
+import uvicorn
 from mcp import McpError, types
 from mcp.client.stdio import StdioServerParameters
 
+from mcp_proxy import mcp_server, supervised_backend
+from mcp_proxy.mcp_server import MCPServerSettings, run_mcp_server
 from mcp_proxy.supervised_backend import SupervisedBackend
 
 FAKE_SERVER = textwrap.dedent(
@@ -114,7 +119,9 @@ async def test_stop_kills_backend_that_outlives_stdin_eof(tmp_path: Path) -> Non
     # the wrapper, or it is orphaned holding its ports.
     script = tmp_path / "lingering_server.py"
     script.write_text(FAKE_SERVER + "import time\ntime.sleep(600)\n")
-    wrapped = StdioServerParameters(command="/bin/sh", args=["-c", f"'{sys.executable}' '{script}'; true"])
+    wrapped = StdioServerParameters(
+        command="/bin/sh", args=["-c", f"'{sys.executable}' '{script}'; true"]
+    )
     backend = SupervisedBackend("a", wrapped)
     with anyio.fail_after(15):
         async with anyio.create_task_group() as tg:
@@ -124,3 +131,68 @@ async def test_stop_kills_backend_that_outlives_stdin_eof(tmp_path: Path) -> Non
             backend.stop()
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+async def _initialize(client: httpx.AsyncClient, name: str) -> int:
+    response = await client.post(
+        f"/servers/{name}/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        },
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    return response.status_code
+
+
+async def test_slow_backend_does_not_delay_serving_others(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A slow `npx` start once kept the whole proxy from serving for hours. The proxy must
+    # serve the fast backend right away and mount the slow one once it comes up.
+    fast = tmp_path / "fast_server.py"
+    fast.write_text(FAKE_SERVER)
+    slow = tmp_path / "slow_server.py"
+    slow.write_text("import time\ntime.sleep(5)\n" + FAKE_SERVER)
+    monkeypatch.setattr(mcp_server, "STARTUP_GRACE_S", 1.0)
+    monkeypatch.setattr(supervised_backend, "READY_TIMEOUT_S", 2.0)  # slow outlasts one wait
+    monkeypatch.setattr(mcp_server, "_backends", {})
+
+    servers: list[uvicorn.Server] = []
+
+    class CapturedServer(uvicorn.Server):
+        def __init__(self, config: uvicorn.Config) -> None:
+            super().__init__(config)
+            servers.append(self)
+
+    monkeypatch.setattr(uvicorn, "Server", CapturedServer)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    named = {
+        "fast": StdioServerParameters(command=sys.executable, args=[str(fast)]),
+        "slow": StdioServerParameters(command=sys.executable, args=[str(slow)]),
+    }
+
+    with anyio.fail_after(40):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                run_mcp_server, MCPServerSettings(bind_host="127.0.0.1", port=port), None, named
+            )
+            while not (servers and servers[0].started):
+                await anyio.sleep(0.05)
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                while await _initialize(client, "fast") != httpx.codes.OK:
+                    await anyio.sleep(0.1)
+                assert mcp_server._backends["slow"].state != "up"  # noqa: SLF001
+                assert await _initialize(client, "slow") == httpx.codes.NOT_FOUND
+                while await _initialize(client, "slow") != httpx.codes.OK:
+                    await anyio.sleep(0.2)
+            servers[0].should_exit = True
