@@ -4,7 +4,7 @@
 import asyncio
 import contextlib
 import typing as t
-from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 import uvicorn
@@ -298,6 +298,7 @@ async def test_run_mcp_server_with_default_server(
         mock_create_routes.assert_called_once_with(
             mock_proxy,
             stateless_instance=mock_settings.stateless,
+            security_settings=ANY,
         )
         mock_logger.info.assert_any_call(
             "Setting up server '%s': %s %s",
@@ -522,6 +523,7 @@ async def test_run_mcp_server_stateless_mode(
         mock_create_routes.assert_called_once_with(
             mock_proxy,
             stateless_instance=True,
+            security_settings=ANY,
         )
 
 

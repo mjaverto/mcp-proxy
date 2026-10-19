@@ -13,6 +13,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.server import Server as MCPServerSDK  # Renamed to avoid conflict
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
@@ -86,10 +87,31 @@ async def _handle_healthz(_: Request) -> Response:
     return Response(status_code=204)
 
 
+LOOPBACK_HOSTS: Final[tuple[str, ...]] = ("127.0.0.1", "localhost", "::1")
+
+
+def loopback_security_settings(bind_host: str, port: int) -> TransportSecuritySettings | None:
+    """Reject requests whose Host or Origin isn't this loopback listener (DNS rebinding).
+
+    Without it, a web page can rebind its own hostname to 127.0.0.1 and call every backend.
+    Returns ``None`` (no check, the SDK default) when bound to a non-loopback address,
+    where the expected Host is unknown.
+    """
+    if bind_host not in LOOPBACK_HOSTS:
+        return None
+    hosts = [f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=[f"http://{h}" for h in hosts],
+    )
+
+
 def create_single_instance_routes(
     mcp_server_instance: MCPServerSDK[object],
     *,
     stateless_instance: bool,
+    security_settings: TransportSecuritySettings | None = None,
 ) -> tuple[list[BaseRoute], StreamableHTTPSessionManager]:  # Return the manager itself
     """Create Starlette routes and the HTTP session manager for a single MCP server instance."""
     logger.debug(
@@ -97,12 +119,13 @@ def create_single_instance_routes(
         stateless_instance,
     )
 
-    sse_transport = SseServerTransport("/messages/")
+    sse_transport = SseServerTransport("/messages/", security_settings=security_settings)
     http_session_manager = StreamableHTTPSessionManager(
         app=mcp_server_instance,
         event_store=None,
         json_response=True,
         stateless=stateless_instance,
+        security_settings=security_settings,
     )
 
     async def handle_sse_instance(request: Request) -> Response:
@@ -251,6 +274,9 @@ async def run_mcp_server(  # noqa: C901, PLR0915
             routes, http_manager = create_single_instance_routes(
                 proxy,
                 stateless_instance=mcp_settings.stateless,
+                security_settings=loopback_security_settings(
+                    mcp_settings.bind_host, mcp_settings.port
+                ),
             )
             async with http_manager.run():
                 if name == "default" and default_server_params:
