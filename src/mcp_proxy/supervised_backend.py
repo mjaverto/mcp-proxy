@@ -51,6 +51,7 @@ class SupervisedBackend:
         self._stopping = False
         self._finished = anyio.Event()
         self._scope = anyio.CancelScope()
+        self._starting: anyio.CancelScope | None = None
 
     def status(self) -> dict[str, t.Any]:
         """Return state and restart count for ``/status``."""
@@ -59,16 +60,19 @@ class SupervisedBackend:
     def stop(self) -> None:
         """Stop supervising: shut the backend down and never restart it.
 
-        A live backend is ended by releasing its session wait, not by cancelling:
-        ``stdio_client``'s exit closes stdin, waits, then kills the process group,
-        and under cancellation that wait aborts before the kill. A backend that
-        ignores stdin EOF (figma-console keeps its WebSocket server up) would be
-        orphaned. Anything not yet up holds no session, so it is cancelled.
+        A live backend is ended by releasing its session wait, and one still starting by
+        cancelling only its ``initialize``, never by cancelling ``stdio_client``: its exit
+        closes stdin, waits, then kills the process group, and under cancellation that
+        wait aborts before the kill. A backend that ignores stdin EOF (figma-console keeps
+        its WebSocket server up, npx keeps downloading) would be orphaned. Between
+        attempts there is no process, so the supervisor itself is cancelled.
         """
         self.state = "stopped"
         self._stopping = True
         if self._session is not None:
             self._dead.set()
+        elif self._starting is not None:
+            self._starting.cancel()
         else:
             self._scope.cancel()
 
@@ -105,33 +109,43 @@ class SupervisedBackend:
 
     async def _serve_once(self) -> None:
         self._dead = anyio.Event()
-        async with stdio_client(self.params) as (read, write), anyio.create_task_group() as tg:
-            # Relay the backend's output so we see EOF the moment the process exits.
-            relay_send, relay_recv = anyio.create_memory_object_stream[SessionMessage | Exception](
-                0
-            )
+        starting = self._starting = anyio.CancelScope()
+        try:
+            async with (
+                stdio_client(self.params) as (read, write),
+                anyio.create_task_group() as tg,
+            ):
+                # Relay the backend's output so we see EOF the moment the process exits.
+                relay_send, relay_recv = anyio.create_memory_object_stream[
+                    SessionMessage | Exception
+                ](0)
 
-            async def relay() -> None:
-                async with relay_send:
-                    async for msg in read:
-                        await relay_send.send(msg)
-                self._dead.set()
+                async def relay() -> None:
+                    async with relay_send:
+                        async for msg in read:
+                            await relay_send.send(msg)
+                    self._dead.set()
 
-            tg.start_soon(relay)
-            async with ClientSession(relay_recv, write) as session:
-                result = await session.initialize()
-                if self.init_result is None:
-                    self.init_result = result
-                self._session = session
-                self.state = "up"
-                self._ready.set()
-                logger.info("Backend '%s' is up", self.name)
-                await self._dead.wait()
-                if not self._stopping:
-                    logger.warning("Backend '%s' connection lost", self.name)
-                self._session = None
-                self._ready = anyio.Event()
-            tg.cancel_scope.cancel()
+                tg.start_soon(relay)
+                async with ClientSession(relay_recv, write) as session:
+                    with starting:
+                        result = await session.initialize()
+                    self._starting = None
+                    if not starting.cancelled_caught:
+                        if self.init_result is None:
+                            self.init_result = result
+                        self._session = session
+                        self.state = "up"
+                        self._ready.set()
+                        logger.info("Backend '%s' is up", self.name)
+                        await self._dead.wait()
+                        if not self._stopping:
+                            logger.warning("Backend '%s' connection lost", self.name)
+                        self._session = None
+                        self._ready = anyio.Event()
+                tg.cancel_scope.cancel()
+        finally:
+            self._starting = None
 
     async def _live_session(self) -> ClientSession:
         with anyio.fail_after(READY_TIMEOUT_S):

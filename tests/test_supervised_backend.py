@@ -133,6 +133,35 @@ async def test_stop_kills_backend_that_outlives_stdin_eof(tmp_path: Path) -> Non
         os.kill(pid, 0)
 
 
+async def test_stop_during_startup_kills_backend(tmp_path: Path) -> None:
+    # Like a slow `npx` start: stop() arrives before the server answers initialize, and
+    # the server ignores stdin EOF. It must still be killed, not orphaned.
+    pidfile = tmp_path / "pid"
+    script = tmp_path / "never_ready.py"
+    script.write_text(
+        f"import os, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(600)\n"
+    )
+    wrapped = StdioServerParameters(
+        command="/bin/sh", args=["-c", f"'{sys.executable}' '{script}'; true"]
+    )
+    backend = SupervisedBackend("a", wrapped)
+    with anyio.fail_after(15):
+        async with anyio.create_task_group() as tg:
+            await tg.start(backend.run)
+            while not (pidfile.exists() and pidfile.read_text()):
+                await anyio.sleep(0.05)
+            pid = int(pidfile.read_text())
+            backend.stop()
+    try:
+        with anyio.fail_after(3), pytest.raises(ProcessLookupError):  # noqa: PT012
+            while True:
+                os.kill(pid, 0)
+                await anyio.sleep(0.1)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
 async def _initialize(client: httpx.AsyncClient, name: str) -> int:
     response = await client.post(
         f"/servers/{name}/mcp",
