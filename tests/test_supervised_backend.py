@@ -43,6 +43,10 @@ FAKE_SERVER = textwrap.dedent(
     async def list_resources():
         raise McpError(types.ErrorData(code=types.METHOD_NOT_FOUND, message="Method not found"))
 
+    @app.list_prompts()  # a live server answering with -32000 (the SDK's "connection closed" code)
+    async def list_prompts():
+        raise McpError(types.ErrorData(code=-32000, message="server-side failure"))
+
     async def main():
         async with stdio_server() as (r, w):
             await app.run(r, w, app.create_initialization_options())
@@ -99,6 +103,18 @@ async def test_jsonrpc_error_is_returned_without_restart(params: StdioServerPara
         with pytest.raises(McpError) as exc:
             await a.list_resources()
         assert exc.value.error.code == types.METHOD_NOT_FOUND
+        assert await _pid(a) == old_pid
+        assert a.restarts == 0
+
+
+async def test_minus_32000_from_live_backend_does_not_restart(
+    params: StdioServerParameters,
+) -> None:
+    async with two_backends(params) as (a, _):
+        old_pid = await _pid(a)
+        with pytest.raises(McpError) as exc:
+            await a.list_prompts()
+        assert exc.value.error.code == -32000  # noqa: PLR2004
         assert await _pid(a) == old_pid
         assert a.restarts == 0
 

@@ -12,7 +12,7 @@ import typing as t
 
 import anyio
 from anyio.abc import TaskStatus
-from mcp import McpError, types
+from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.shared.message import SessionMessage
@@ -30,8 +30,8 @@ BACKOFF_MAX_S = 30.0
 
 
 def _is_transport_error(exc: BaseException) -> bool:
-    if isinstance(exc, McpError):
-        return exc.error.code == types.CONNECTION_CLOSED
+    # JSON-RPC errors (McpError), including -32000, are the backend's answer, not a dead pipe.
+    # A dead pipe is detected by the stdout relay in _serve_once.
     return isinstance(exc, TRANSPORT_ERRORS)
 
 
