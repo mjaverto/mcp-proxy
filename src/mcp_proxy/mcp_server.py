@@ -90,20 +90,23 @@ async def _handle_healthz(_: Request) -> Response:
 LOOPBACK_HOSTS: Final[tuple[str, ...]] = ("127.0.0.1", "localhost", "::1")
 
 
-def loopback_security_settings(bind_host: str, port: int) -> TransportSecuritySettings | None:
+def loopback_security_settings(
+    bind_host: str, port: int, allow_origins: list[str] | None = None
+) -> TransportSecuritySettings | None:
     """Reject requests whose Host or Origin isn't this loopback listener (DNS rebinding).
 
     Without it, a web page can rebind its own hostname to 127.0.0.1 and call every backend.
-    Returns ``None`` (no check, the SDK default) when bound to a non-loopback address,
-    where the expected Host is unknown.
+    Origins from ``--allow-origin`` are allowed too; ``*`` opts out of the check, as the SDK
+    cannot match a bare wildcard. Returns ``None`` (no check, the SDK default) when bound to a
+    non-loopback address, where the expected Host is unknown.
     """
-    if bind_host not in LOOPBACK_HOSTS:
+    if bind_host not in LOOPBACK_HOSTS or "*" in (allow_origins or []):
         return None
     hosts = [f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"]
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,
-        allowed_origins=[f"http://{h}" for h in hosts],
+        allowed_origins=[f"http://{h}" for h in hosts] + list(allow_origins or []),
     )
 
 
@@ -275,7 +278,7 @@ async def run_mcp_server(  # noqa: C901, PLR0915
                 proxy,
                 stateless_instance=mcp_settings.stateless,
                 security_settings=loopback_security_settings(
-                    mcp_settings.bind_host, mcp_settings.port
+                    mcp_settings.bind_host, mcp_settings.port, mcp_settings.allow_origins
                 ),
             )
             async with http_manager.run():

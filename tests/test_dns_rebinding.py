@@ -27,11 +27,13 @@ HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
 @contextlib.asynccontextmanager
-async def client_for(bind_host: str) -> AsyncIterator[AsyncClient]:
+async def client_for(
+    bind_host: str, allow_origins: list[str] | None = None
+) -> AsyncIterator[AsyncClient]:
     routes, manager = create_single_instance_routes(
         Server("rebind-test"),
         stateless_instance=True,
-        security_settings=loopback_security_settings(bind_host, PORT),
+        security_settings=loopback_security_settings(bind_host, PORT, allow_origins),
     )
 
     @contextlib.asynccontextmanager
@@ -74,5 +76,34 @@ async def test_non_loopback_bind_keeps_previous_behaviour() -> None:
     async with client_for("0.0.0.0") as client:  # noqa: S104
         response = await client.post(
             "/mcp", json=INITIALIZE, headers={**HEADERS, "Host": "proxy.internal"}
+        )
+    assert response.status_code == HTTPStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_allow_origin_flag_is_honoured() -> None:
+    inspector = "http://localhost:6274"
+    async with client_for("127.0.0.1", [inspector]) as client:
+        allowed = await client.post(
+            "/mcp",
+            json=INITIALIZE,
+            headers={**HEADERS, "Host": f"127.0.0.1:{PORT}", "Origin": inspector},
+        )
+        other = await client.post(
+            "/mcp",
+            json=INITIALIZE,
+            headers={**HEADERS, "Host": f"127.0.0.1:{PORT}", "Origin": "http://evil.example.com"},
+        )
+    assert allowed.status_code == HTTPStatus.OK
+    assert other.status_code == HTTPStatus.FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_wildcard_allow_origin_opts_out() -> None:
+    async with client_for("127.0.0.1", ["*"]) as client:
+        response = await client.post(
+            "/mcp",
+            json=INITIALIZE,
+            headers={**HEADERS, "Host": f"127.0.0.1:{PORT}", "Origin": "http://any.example"},
         )
     assert response.status_code == HTTPStatus.OK
